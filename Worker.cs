@@ -89,18 +89,36 @@ public class Worker(
     private bool ValidateConfiguration()
     {
         var isValid = true;
+        var blobSettings = _settings.AzureBlobStorage;
 
-        if (string.IsNullOrWhiteSpace(_settings.AzureBlobStorage.ContainerUrl) ||
-            _settings.AzureBlobStorage.ContainerUrl.Contains("<account>"))
+        var hasConnectionString = !string.IsNullOrWhiteSpace(blobSettings.ConnectionString);
+        var hasSasConfig = !string.IsNullOrWhiteSpace(blobSettings.ContainerUrl) &&
+                           !blobSettings.ContainerUrl.Contains("<account>") &&
+                           !string.IsNullOrWhiteSpace(blobSettings.SasToken) &&
+                           blobSettings.SasToken != "?sv=...";
+
+        if (hasConnectionString)
         {
-            logger.LogError("Azure Blob Storage ContainerUrl is not configured");
-            isValid = false;
+            if (string.IsNullOrWhiteSpace(blobSettings.ContainerName))
+            {
+                logger.LogError("ContainerName must be specified when using ConnectionString");
+                isValid = false;
+            }
+            else
+            {
+                logger.LogInformation("Using connection string authentication for container: {Container}",
+                    blobSettings.ContainerName);
+            }
         }
-
-        if (string.IsNullOrWhiteSpace(_settings.AzureBlobStorage.SasToken) ||
-            _settings.AzureBlobStorage.SasToken == "?sv=...")
+        else if (hasSasConfig)
         {
-            logger.LogError("Azure Blob Storage SasToken is not configured");
+            logger.LogInformation("Using SAS token authentication for: {ContainerUrl}",
+                blobSettings.ContainerUrl);
+        }
+        else
+        {
+            logger.LogError("Azure Blob Storage authentication not configured. " +
+                           "Provide either ConnectionString+ContainerName or ContainerUrl+SasToken");
             isValid = false;
         }
 

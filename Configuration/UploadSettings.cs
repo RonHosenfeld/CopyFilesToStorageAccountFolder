@@ -12,8 +12,31 @@ public class UploadSettings
 
 public class AzureBlobStorageSettings
 {
+    /// <summary>
+    /// Connection string for Azure Storage (use "UseDevelopmentStorage=true" for Azurite).
+    /// If set, ContainerName must also be provided. Takes precedence over ContainerUrl/SasToken.
+    /// </summary>
+    public string? ConnectionString { get; set; }
+
+    /// <summary>
+    /// Container name when using ConnectionString authentication.
+    /// </summary>
+    public string? ContainerName { get; set; }
+
+    /// <summary>
+    /// Full container URL (without SAS token) for SAS authentication.
+    /// </summary>
     public string ContainerUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// SAS token for authentication (include the leading '?').
+    /// </summary>
     public string SasToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional blob name prefix (virtual folder path). Leave empty for container root.
+    /// </summary>
+    public string? BlobPrefix { get; set; }
 }
 
 public class FileFilterSettings

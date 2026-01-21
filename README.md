@@ -10,6 +10,7 @@ A .NET 10.0 Worker Service that uploads files from local folders to Azure Blob S
 - **Retry Logic**: Exponential backoff for transient Azure errors (429, 503, etc.)
 - **Throttling**: Configurable delay between uploads to avoid rate limiting
 - **Structured Logging**: Serilog with Console and Seq sink support
+- **Local Emulator Support**: Works with Azurite storage emulator for local development
 
 ## Project Structure
 
@@ -31,12 +32,28 @@ A .NET 10.0 Worker Service that uploads files from local folders to Azure Blob S
 ## Prerequisites
 
 - .NET 10.0 SDK
-- Azure Storage Account with a Blob Container
-- SAS token with write permissions to the container
+- Azure Storage Account with a Blob Container **OR** Azurite storage emulator
 
 ## Configuration
 
-Edit `appsettings.json` with your settings:
+The utility supports two authentication methods:
+
+### Option 1: Connection String (Recommended for Azurite/Local Development)
+
+```json
+{
+  "UploadSettings": {
+    "AzureBlobStorage": {
+      "ConnectionString": "UseDevelopmentStorage=true",
+      "ContainerName": "dr-isalus",
+      "BlobPrefix": "dr-isalus-preprocessed"
+    },
+    "SourceFolders": [ "/path/to/files" ]
+  }
+}
+```
+
+### Option 2: SAS Token (For Azure Production)
 
 ```json
 {
@@ -44,6 +61,24 @@ Edit `appsettings.json` with your settings:
     "AzureBlobStorage": {
       "ContainerUrl": "https://youraccount.blob.core.windows.net/yourcontainer",
       "SasToken": "?sv=2022-11-02&ss=b&srt=o&sp=rwc&se=..."
+    },
+    "SourceFolders": [ "/path/to/files" ]
+  }
+}
+```
+
+### Full Configuration Example
+
+```json
+{
+  "UploadSettings": {
+    "AzureBlobStorage": {
+      "ConnectionString": "UseDevelopmentStorage=true",
+      "ContainerName": "dr-isalus",
+      "BlobPrefix": "dr-isalus-preprocessed",
+
+      "ContainerUrl": "",
+      "SasToken": ""
     },
     "SourceFolders": [
       "/path/to/folder1",
@@ -68,6 +103,9 @@ Edit `appsettings.json` with your settings:
 
 | Setting | Description |
 |---------|-------------|
+| `ConnectionString` | Azure Storage connection string. Use `UseDevelopmentStorage=true` for Azurite |
+| `ContainerName` | Container name (required when using ConnectionString) |
+| `BlobPrefix` | Optional virtual folder prefix for uploaded blobs |
 | `ContainerUrl` | Azure Blob Storage container URL (without SAS token) |
 | `SasToken` | SAS token with write permissions (include the leading `?`) |
 | `SourceFolders` | List of local folders to scan for files |
@@ -78,6 +116,59 @@ Edit `appsettings.json` with your settings:
 | `DelayBetweenFilesMs` | Milliseconds to wait between uploads |
 | `MaxRetries` | Number of retry attempts for transient errors |
 | `ProgressFile` | Path to the JSON progress file |
+
+## Using Azurite (Local Storage Emulator)
+
+### Installing Azurite
+
+```bash
+# Via npm
+npm install -g azurite
+
+# Via Docker
+docker pull mcr.microsoft.com/azure-storage/azurite
+```
+
+### Running Azurite
+
+```bash
+# npm installation
+azurite --silent --location ./azurite-data --debug ./azurite-debug.log
+
+# Docker
+docker run -p 10000:10000 -p 10001:10001 -p 10002:10002 \
+  mcr.microsoft.com/azure-storage/azurite
+```
+
+### Creating a Container in Azurite
+
+Use Azure Storage Explorer or the Azure CLI:
+
+```bash
+# Using Azure CLI with Azurite
+az storage container create \
+  --name dr-isalus \
+  --connection-string "UseDevelopmentStorage=true"
+```
+
+Or use Azure Storage Explorer (connects to `http://127.0.0.1:10000/devstoreaccount1`).
+
+### Configuration for Azurite
+
+```json
+{
+  "UploadSettings": {
+    "AzureBlobStorage": {
+      "ConnectionString": "UseDevelopmentStorage=true",
+      "ContainerName": "dr-isalus",
+      "BlobPrefix": "dr-isalus-preprocessed"
+    }
+  }
+}
+```
+
+With this configuration, a file named `report.pdf` would be uploaded as:
+`dr-isalus-preprocessed/report.pdf` in the `dr-isalus` container.
 
 ### Using User Secrets (Recommended for SAS Token)
 
@@ -107,6 +198,7 @@ dotnet bin/Debug/net10.0/CopyFilesToStorageAccountFolder.dll
 3. **File Discovery**: Scans source folders, applies filters, computes MD5 checksums
 4. **Upload Loop**: For each pending file:
    - Extracts filename only (flattened path structure)
+   - Applies optional blob prefix
    - Uploads to Azure Blob Storage (overwrites if blob exists)
    - Retries transient errors with exponential backoff
    - Saves progress immediately after each file
@@ -115,12 +207,19 @@ dotnet bin/Debug/net10.0/CopyFilesToStorageAccountFolder.dll
 
 ## Blob Naming
 
-Files are uploaded with **flattened names** (filename only, no folder structure):
+Files are uploaded with **flattened names** (filename only, no source folder structure).
+
+With `BlobPrefix` empty:
 
 | Local Path | Blob Name |
 |------------|-----------|
 | `/data/reports/2024/report.pdf` | `report.pdf` |
-| `/data/archive/report.pdf` | `report.pdf` (overwrites previous) |
+
+With `BlobPrefix` set to `dr-isalus-preprocessed`:
+
+| Local Path | Blob Name |
+|------------|-----------|
+| `/data/reports/2024/report.pdf` | `dr-isalus-preprocessed/report.pdf` |
 
 If multiple files have the same name, later files overwrite earlier ones.
 
@@ -158,7 +257,7 @@ docker run -d --name seq -p 5341:80 datalust/seq:latest
 
 Then view logs at http://localhost:5341
 
-## Generating a SAS Token
+## Generating a SAS Token (Azure Production)
 
 In Azure Portal:
 1. Navigate to your Storage Account
@@ -186,11 +285,13 @@ az storage container generate-sas \
 
 | Issue | Solution |
 |-------|----------|
-| "ContainerUrl is not configured" | Update `appsettings.json` with your Azure container URL |
-| "SasToken is not configured" | Add your SAS token to config or user secrets |
+| "authentication not configured" | Provide either `ConnectionString`+`ContainerName` or `ContainerUrl`+`SasToken` |
+| "ContainerName must be specified" | When using `ConnectionString`, you must also set `ContainerName` |
 | "Source folder does not exist" | Verify paths in `SourceFolders` are correct |
 | 403 Forbidden errors | Check SAS token has write permissions and hasn't expired |
 | 429 Too Many Requests | Increase `DelayBetweenFilesMs` to reduce upload rate |
+| Connection refused (Azurite) | Ensure Azurite is running on port 10000 |
+| Container not found (Azurite) | Create the container first using Azure Storage Explorer or CLI |
 
 ## License
 

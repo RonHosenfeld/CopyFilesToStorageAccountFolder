@@ -19,13 +19,37 @@ public class BlobUploadService : IBlobUploadService
         _settings = settings.Value;
         _logger = logger;
 
-        var containerUri = new Uri(_settings.AzureBlobStorage.ContainerUrl + _settings.AzureBlobStorage.SasToken);
-        _containerClient = new BlobContainerClient(containerUri);
+        _containerClient = CreateContainerClient();
+    }
+
+    private BlobContainerClient CreateContainerClient()
+    {
+        var blobSettings = _settings.AzureBlobStorage;
+
+        if (!string.IsNullOrWhiteSpace(blobSettings.ConnectionString))
+        {
+            if (string.IsNullOrWhiteSpace(blobSettings.ContainerName))
+            {
+                throw new InvalidOperationException(
+                    "ContainerName must be specified when using ConnectionString authentication.");
+            }
+
+            _logger.LogInformation(
+                "Using connection string authentication for container: {Container}",
+                blobSettings.ContainerName);
+
+            return new BlobContainerClient(blobSettings.ConnectionString, blobSettings.ContainerName);
+        }
+
+        var containerUri = new Uri(blobSettings.ContainerUrl + blobSettings.SasToken);
+        _logger.LogInformation("Using SAS token authentication for: {ContainerUrl}", blobSettings.ContainerUrl);
+
+        return new BlobContainerClient(containerUri);
     }
 
     public async Task<FileUploadResult> UploadFileAsync(DiscoveredFile file, CancellationToken cancellationToken = default)
     {
-        var blobName = file.FileName;
+        var blobName = GetBlobName(file.FileName);
         var retryCount = 0;
         var maxRetries = _settings.Throttling.MaxRetries;
 
@@ -86,6 +110,19 @@ public class BlobUploadService : IBlobUploadService
             Checksum: file.Checksum,
             ErrorMessage: $"Max retries ({maxRetries}) exceeded"
         );
+    }
+
+    private string GetBlobName(string fileName)
+    {
+        var prefix = _settings.AzureBlobStorage.BlobPrefix;
+
+        if (string.IsNullOrWhiteSpace(prefix))
+        {
+            return fileName;
+        }
+
+        prefix = prefix.TrimEnd('/');
+        return $"{prefix}/{fileName}";
     }
 
     private static bool IsTransientError(RequestFailedException ex)
