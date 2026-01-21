@@ -1,7 +1,40 @@
 using CopyFilesToStorageAccountFolder;
+using CopyFilesToStorageAccountFolder.Configuration;
+using CopyFilesToStorageAccountFolder.Services;
+using Serilog;
 
-var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddHostedService<Worker>();
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
-var host = builder.Build();
-host.Run();
+try
+{
+    Log.Information("Starting Azure Blob Storage upload service");
+
+    var builder = Host.CreateApplicationBuilder(args);
+
+    builder.Services.AddSerilog((services, lc) => lc
+        .ReadFrom.Configuration(builder.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext());
+
+    builder.Services.Configure<UploadSettings>(
+        builder.Configuration.GetSection("UploadSettings"));
+
+    builder.Services.AddSingleton<IFileDiscoveryService, FileDiscoveryService>();
+    builder.Services.AddSingleton<IBlobUploadService, BlobUploadService>();
+    builder.Services.AddSingleton<IProgressTrackingService, ProgressTrackingService>();
+
+    builder.Services.AddHostedService<Worker>();
+
+    var host = builder.Build();
+    host.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
