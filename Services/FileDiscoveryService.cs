@@ -22,33 +22,95 @@ public class FileDiscoveryService(
                 continue;
             }
 
-            var searchOption = _settings.ScanRecursively
-                ? SearchOption.AllDirectories
-                : SearchOption.TopDirectoryOnly;
-
-            var files = Directory.EnumerateFiles(folder, "*", searchOption);
-
-            foreach (var filePath in files)
+            foreach (var directory in GetDirectoriesToProcess(folder))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (!ShouldIncludeFile(filePath))
+                await foreach (var file in ProcessDirectoryAsync(directory, cancellationToken))
                 {
-                    logger.LogDebug("Skipping file due to filter: {FilePath}", filePath);
-                    continue;
+                    yield return file;
                 }
-
-                var fileInfo = new FileInfo(filePath);
-                var checksum = await ComputeChecksumAsync(filePath, cancellationToken);
-
-                yield return new DiscoveredFile(
-                    FullPath: filePath,
-                    FileName: fileInfo.Name,
-                    Checksum: checksum,
-                    FileSize: fileInfo.Length
-                );
             }
         }
+    }
+
+    private IEnumerable<string> GetDirectoriesToProcess(string sourceFolder)
+    {
+        yield return sourceFolder;
+
+        if (!_settings.ScanRecursively)
+        {
+            yield break;
+        }
+
+        IEnumerable<string> subdirectories;
+        try
+        {
+            subdirectories = Directory.EnumerateDirectories(sourceFolder, "*", SearchOption.AllDirectories)
+                .OrderBy(d => d, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            logger.LogWarning(ex, "Access denied to subdirectories in: {Folder}", sourceFolder);
+            yield break;
+        }
+
+        foreach (var subdir in subdirectories)
+        {
+            yield return subdir;
+        }
+    }
+
+    private async IAsyncEnumerable<DiscoveredFile> ProcessDirectoryAsync(
+        string directory,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        IEnumerable<string> files;
+        try
+        {
+            files = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            logger.LogWarning(ex, "Access denied to directory: {Directory}", directory);
+            yield break;
+        }
+
+        var filteredFiles = files
+            .Where(ShouldIncludeFile)
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var nonJsonFiles = filteredFiles.Where(f => !IsJsonFile(f));
+        var jsonFiles = filteredFiles.Where(IsJsonFile);
+
+        foreach (var filePath in nonJsonFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return await CreateDiscoveredFileAsync(filePath, cancellationToken);
+        }
+
+        foreach (var filePath in jsonFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return await CreateDiscoveredFileAsync(filePath, cancellationToken);
+        }
+    }
+
+    private static bool IsJsonFile(string filePath)
+    {
+        return Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<DiscoveredFile> CreateDiscoveredFileAsync(string filePath, CancellationToken cancellationToken)
+    {
+        var fileInfo = new FileInfo(filePath);
+        var checksum = await ComputeChecksumAsync(filePath, cancellationToken);
+
+        return new DiscoveredFile(
+            FullPath: filePath,
+            FileName: fileInfo.Name,
+            Checksum: checksum,
+            FileSize: fileInfo.Length
+        );
     }
 
     private bool ShouldIncludeFile(string filePath)
