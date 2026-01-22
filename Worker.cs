@@ -8,6 +8,7 @@ public class Worker(
     IFileDiscoveryService fileDiscoveryService,
     IBlobUploadService blobUploadService,
     IProgressTrackingService progressTrackingService,
+    IUploadStateService uploadStateService,
     IOptions<UploadSettings> settings,
     ILogger<Worker> logger,
     IHostApplicationLifetime appLifetime) : BackgroundService
@@ -25,6 +26,13 @@ public class Worker(
                 return;
             }
 
+            // Initialize UI state with configuration
+            var destination = GetDestinationDisplayName();
+            uploadStateService.Initialize(
+                _settings.SourceFolders,
+                destination,
+                _settings.Throttling.DelayBetweenFilesMs);
+
             var progress = await progressTrackingService.LoadProgressAsync(stoppingToken);
 
             var stats = new UploadStats();
@@ -34,13 +42,17 @@ public class Worker(
             await foreach (var file in fileDiscoveryService.DiscoverFilesAsync(stoppingToken))
             {
                 stats.TotalDiscovered++;
+                uploadStateService.UpdateDiscovered(stats.TotalDiscovered);
 
                 if (progressTrackingService.IsFileCompleted(progress, file))
                 {
                     logger.LogDebug("Skipping already completed file: {FilePath}", file.FullPath);
                     stats.Skipped++;
+                    uploadStateService.RecordSkipped();
                     continue;
                 }
+
+                uploadStateService.SetCurrentFile(file.FullPath, file.FileSize);
 
                 logger.LogInformation(
                     "Processing file {Current}: {FileName} ({Size} bytes)",
@@ -52,11 +64,13 @@ public class Worker(
                 {
                     progressTrackingService.MarkCompleted(progress, result);
                     stats.Succeeded++;
+                    uploadStateService.RecordSuccess();
                 }
                 else
                 {
                     progressTrackingService.MarkFailed(progress, result);
                     stats.Failed++;
+                    uploadStateService.RecordFailed(result.ErrorMessage);
                 }
 
                 await progressTrackingService.SaveProgressAsync(progress, stoppingToken);
@@ -70,6 +84,7 @@ public class Worker(
             progress.CompletedAt = DateTime.UtcNow;
             await progressTrackingService.SaveProgressAsync(progress, stoppingToken);
 
+            uploadStateService.SetCompleted();
             LogSummary(stats);
 
             logger.LogInformation("Upload process completed. Shutting down.");
@@ -137,6 +152,32 @@ public class Worker(
         }
 
         return isValid;
+    }
+
+    private string GetDestinationDisplayName()
+    {
+        var blobSettings = _settings.AzureBlobStorage;
+
+        if (!string.IsNullOrWhiteSpace(blobSettings.ConnectionString) &&
+            !string.IsNullOrWhiteSpace(blobSettings.ContainerName))
+        {
+            return blobSettings.ContainerName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(blobSettings.ContainerUrl))
+        {
+            try
+            {
+                var uri = new Uri(blobSettings.ContainerUrl);
+                return uri.Host + uri.AbsolutePath.TrimEnd('/');
+            }
+            catch
+            {
+                return blobSettings.ContainerUrl;
+            }
+        }
+
+        return "(unknown)";
     }
 
     private void LogSummary(UploadStats stats)
