@@ -11,6 +11,7 @@ public class RetroConsoleUI(
     IOptions<UISettings> uiSettings) : IConsoleUI
 {
     private readonly int _refreshRateMs = uiSettings.Value.RefreshRateMs;
+    private readonly int _maxVisibleFolders = uiSettings.Value.MaxVisibleFolders;
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -52,34 +53,54 @@ public class RetroConsoleUI(
 
     private IRenderable BuildDisplay()
     {
-        var state = stateService.CurrentState;
-        var table = new Table()
-            .Border(TableBorder.Double)
-            .BorderColor(RetroTheme.Primary)
-            .Expand();
+        try
+        {
+            var state = stateService.CurrentState;
+            var table = new Table()
+                .Border(TableBorder.Double)
+                .BorderColor(RetroTheme.Primary)
+                .Expand();
 
-        table.AddColumn(new TableColumn(string.Empty).NoWrap());
+            table.AddColumn(new TableColumn(string.Empty).NoWrap());
 
-        // Header with ASCII logo
-        table.AddRow(BuildHeader());
-        table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
+            // Header with ASCII logo
+            table.AddRow(BuildHeader());
+            table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
 
-        // Source/Destination panel
-        table.AddRow(BuildSourceDestPanel(state));
-        table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
+            // Source/Destination panel
+            table.AddRow(BuildSourceDestPanel(state));
+            table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
 
-        // Progress panel
-        table.AddRow(BuildProgressPanel(state));
-        table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
+            // Show enumeration panel during scanning, otherwise show folder progress
+            if (state.IsEnumerating)
+            {
+                table.AddRow(BuildEnumerationPanel(state));
+                table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
+            }
+            else if (state.FolderProgressList.Count > 0)
+            {
+                table.AddRow(BuildFolderProgressPanel(state));
+                table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
+            }
 
-        // Current file
-        table.AddRow(BuildCurrentFilePanel(state));
-        table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
+            // Progress panel
+            table.AddRow(BuildProgressPanel(state));
+            table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
 
-        // Stats footer
-        table.AddRow(BuildStatsFooter(state));
+            // Current file
+            table.AddRow(BuildCurrentFilePanel(state));
+            table.AddRow(new Rule().RuleStyle(RetroTheme.PrimaryStyle));
 
-        return table;
+            // Stats footer
+            table.AddRow(BuildStatsFooter(state));
+
+            return table;
+        }
+        catch (Exception ex)
+        {
+            // If rendering fails, show error message instead of crashing
+            return new Markup($"[red]UI Error: {ex.Message.EscapeMarkup()}[/]");
+        }
     }
 
     private static IRenderable BuildHeader()
@@ -110,6 +131,14 @@ public class RetroConsoleUI(
         grid.AddRow(
             new Markup($"[rgb(0,200,255)]> {sourceText.EscapeMarkup()}[/]"),
             new Markup($"[rgb(0,200,255)]{destText.EscapeMarkup()}[/]"));
+
+        // Show folder/file counts after enumeration
+        if (state.TotalFolders > 0)
+        {
+            grid.AddRow(
+                new Markup($"[dim]Folders:[/] [rgb(0,255,128)]{state.TotalFolders:N0}[/]  [dim]|[/]  [dim]Files:[/] [rgb(0,255,128)]{state.TotalDiscovered:N0}[/]"),
+                new Text(string.Empty));
+        }
 
         return grid;
     }
@@ -208,12 +237,131 @@ public class RetroConsoleUI(
         var processed = state.Succeeded + state.Skipped + state.Failed;
         var rate = elapsed.TotalSeconds > 0 ? processed / elapsed.TotalSeconds : 0;
 
-        var statusText = state.IsCompleted ? "[rgb(0,255,128) bold]DONE[/]" : "[rgb(0,200,255)]RUNNING[/]";
+        var statusText = state.IsCompleted
+            ? "[rgb(0,255,128) bold]DONE[/]"
+            : state.IsEnumerating
+                ? "[rgb(255,200,0)]SCANNING[/]"
+                : "[rgb(0,200,255)]RUNNING[/]";
 
         return new Markup(
             $"[dim]Elapsed:[/] [rgb(0,255,128)]{elapsedStr}[/]   " +
             $"[dim]Throttle:[/] [rgb(0,255,128)]{state.ThrottleDelayMs}ms[/]   " +
             $"[dim]Rate:[/] [rgb(0,255,128)]~{rate:F1} files/sec[/]   " +
             $"[dim]Status:[/] {statusText}");
+    }
+
+    private static IRenderable BuildEnumerationPanel(UploadState state)
+    {
+        var rows = new List<IRenderable>
+        {
+            new Markup("[rgb(255,200,0) bold]SCANNING...[/]")
+        };
+
+        if (!string.IsNullOrEmpty(state.EnumerationStatus))
+        {
+            var truncatedStatus = state.EnumerationStatus.Length > 60
+                ? "..." + state.EnumerationStatus[^57..]
+                : state.EnumerationStatus;
+            rows.Add(new Markup($"[dim]{truncatedStatus.EscapeMarkup()}[/]"));
+        }
+
+        return new Rows(rows);
+    }
+
+    private IRenderable BuildFolderProgressPanel(UploadState state)
+    {
+        var folderList = state.FolderProgressList;
+        if (folderList.Count == 0)
+            return new Text(string.Empty);
+
+        var rows = new List<IRenderable>
+        {
+            new Markup("[rgb(0,255,128) bold]FOLDER PROGRESS[/]")
+        };
+
+        // Find current folder index for scrolling
+        var currentIndex = folderList.FindIndex(f => f.IsCurrentFolder);
+        if (currentIndex < 0) currentIndex = 0;
+
+        // Calculate visible window
+        var startIndex = 0;
+        var endIndex = Math.Min(_maxVisibleFolders, folderList.Count);
+
+        if (folderList.Count > _maxVisibleFolders)
+        {
+            // Center current folder in view, with bias toward showing more below
+            var halfVisible = _maxVisibleFolders / 2;
+            startIndex = Math.Max(0, currentIndex - halfVisible);
+            endIndex = Math.Min(folderList.Count, startIndex + _maxVisibleFolders);
+
+            // Adjust if we hit the end
+            if (endIndex == folderList.Count)
+            {
+                startIndex = Math.Max(0, endIndex - _maxVisibleFolders);
+            }
+        }
+
+        // Add "more above" indicator
+        if (startIndex > 0)
+        {
+            rows.Add(new Markup($"[dim]    ^ {startIndex} more above[/]"));
+        }
+
+        // Build folder progress rows
+        for (var i = startIndex; i < endIndex; i++)
+        {
+            var folder = folderList[i];
+            rows.Add(BuildFolderProgressRow(folder));
+        }
+
+        // Add "more below" indicator
+        var remaining = folderList.Count - endIndex;
+        if (remaining > 0)
+        {
+            rows.Add(new Markup($"[dim]    v {remaining} more below[/]"));
+        }
+
+        return new Rows(rows);
+    }
+
+    private static IRenderable BuildFolderProgressRow(FolderProgress folder)
+    {
+        var prefix = folder.IsCurrentFolder ? "> " : "  ";
+        var color = folder.IsCurrentFolder
+            ? "rgb(0,200,255)"
+            : folder.IsCompleted
+                ? "dim"
+                : "rgb(0,255,128)";
+
+        // Truncate folder name if too long and escape for markup
+        var displayName = folder.DisplayName ?? "(unknown)";
+        if (displayName.Length > 25)
+            displayName = "..." + displayName[^22..];
+        var escapedName = displayName.EscapeMarkup().PadRight(25);
+
+        var progressRatio = folder.TotalFiles > 0
+            ? (double)folder.Processed / folder.TotalFiles
+            : 0;
+        var barWidth = 20;
+        var filledWidth = (int)(progressRatio * barWidth);
+        var emptyWidth = barWidth - filledWidth;
+
+        var filledBar = new string('#', filledWidth);
+        var emptyBar = new string(' ', emptyWidth);
+
+        var barColor = folder.IsCompleted
+            ? "rgb(0,255,128)"
+            : folder.IsCurrentFolder
+                ? "rgb(0,200,255)"
+                : "rgb(100,100,100)";
+
+        var stats = $"{folder.Processed}/{folder.TotalFiles}";
+        if (folder.Failed > 0)
+        {
+            stats += $" [rgb(255,80,80)]({folder.Failed} failed)[/]";
+        }
+
+        return new Markup(
+            $"[{color}]{prefix}{escapedName}[/] [[[{barColor}]{filledBar}[/][rgb(40,40,40)]{emptyBar}[/]]] [{color}]{stats}[/]");
     }
 }

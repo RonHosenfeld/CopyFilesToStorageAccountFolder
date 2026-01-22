@@ -75,7 +75,7 @@ public class ProgressTrackingService(
         {
             SourcePath = result.SourcePath,
             BlobName = result.BlobName,
-            Checksum = result.Checksum,
+            Checksum = result.Checksum ?? string.Empty,
             Timestamp = DateTime.UtcNow
         });
     }
@@ -86,7 +86,7 @@ public class ProgressTrackingService(
         {
             SourcePath = result.SourcePath,
             BlobName = result.BlobName,
-            Checksum = result.Checksum,
+            Checksum = result.Checksum ?? string.Empty,
             Timestamp = DateTime.UtcNow,
             ErrorMessage = result.ErrorMessage
         });

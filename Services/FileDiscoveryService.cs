@@ -85,13 +85,13 @@ public class FileDiscoveryService(
         foreach (var filePath in nonJsonFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            yield return await CreateDiscoveredFileAsync(filePath, cancellationToken);
+            yield return await CreateDiscoveredFileAsync(filePath, computeChecksum: true, cancellationToken);
         }
 
         foreach (var filePath in jsonFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            yield return await CreateDiscoveredFileAsync(filePath, cancellationToken);
+            yield return await CreateDiscoveredFileAsync(filePath, computeChecksum: true, cancellationToken);
         }
     }
 
@@ -100,17 +100,31 @@ public class FileDiscoveryService(
         return Path.GetExtension(filePath).Equals(".json", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<DiscoveredFile> CreateDiscoveredFileAsync(string filePath, CancellationToken cancellationToken)
+    private async Task<DiscoveredFile> CreateDiscoveredFileAsync(string filePath, bool computeChecksum, CancellationToken cancellationToken)
     {
         var fileInfo = new FileInfo(filePath);
-        var checksum = await ComputeChecksumAsync(filePath, cancellationToken);
+        string? checksum = null;
+
+        if (computeChecksum)
+        {
+            checksum = await ComputeChecksumInternalAsync(filePath, cancellationToken);
+        }
 
         return new DiscoveredFile(
             FullPath: filePath,
             FileName: fileInfo.Name,
-            Checksum: checksum,
-            FileSize: fileInfo.Length
+            FileSize: fileInfo.Length,
+            Checksum: checksum
         );
+    }
+
+    public async Task<DiscoveredFile> WithChecksumAsync(DiscoveredFile file, CancellationToken cancellationToken = default)
+    {
+        if (!string.IsNullOrEmpty(file.Checksum))
+            return file;
+
+        var checksum = await ComputeChecksumInternalAsync(file.FullPath, cancellationToken);
+        return file with { Checksum = checksum };
     }
 
     private bool ShouldIncludeFile(string filePath)
@@ -138,10 +152,89 @@ public class FileDiscoveryService(
         return true;
     }
 
-    private static async Task<string> ComputeChecksumAsync(string filePath, CancellationToken cancellationToken)
+    private static async Task<string> ComputeChecksumInternalAsync(string filePath, CancellationToken cancellationToken)
     {
         await using var stream = File.OpenRead(filePath);
         var hash = await MD5.HashDataAsync(stream, cancellationToken);
         return Convert.ToBase64String(hash);
+    }
+
+    public async Task<EnumerationResult> PreEnumerateAllFilesAsync(
+        Action<string>? onFolderScanned = null,
+        CancellationToken cancellationToken = default)
+    {
+        var folders = new List<FolderEnumeration>();
+
+        foreach (var sourceFolder in _settings.SourceFolders)
+        {
+            if (!Directory.Exists(sourceFolder))
+            {
+                logger.LogWarning("Source folder does not exist: {Folder}", sourceFolder);
+                continue;
+            }
+
+            foreach (var directory in GetDirectoriesToProcess(sourceFolder))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                onFolderScanned?.Invoke(directory);
+
+                var files = await EnumerateDirectoryFilesAsync(directory, cancellationToken);
+                if (files.Count > 0)
+                {
+                    folders.Add(new FolderEnumeration
+                    {
+                        FolderPath = directory,
+                        Files = files
+                    });
+                }
+            }
+        }
+
+        return new EnumerationResult
+        {
+            TotalFolders = folders.Count,
+            TotalFiles = folders.Sum(f => f.Files.Count),
+            Folders = folders
+        };
+    }
+
+    private async Task<List<DiscoveredFile>> EnumerateDirectoryFilesAsync(
+        string directory,
+        CancellationToken cancellationToken)
+    {
+        var result = new List<DiscoveredFile>();
+
+        IEnumerable<string> files;
+        try
+        {
+            files = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            logger.LogWarning(ex, "Access denied to directory: {Directory}", directory);
+            return result;
+        }
+
+        var filteredFiles = files
+            .Where(ShouldIncludeFile)
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var nonJsonFiles = filteredFiles.Where(f => !IsJsonFile(f));
+        var jsonFiles = filteredFiles.Where(IsJsonFile);
+
+        foreach (var filePath in nonJsonFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            result.Add(await CreateDiscoveredFileAsync(filePath, computeChecksum: false, cancellationToken));
+        }
+
+        foreach (var filePath in jsonFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            result.Add(await CreateDiscoveredFileAsync(filePath, computeChecksum: false, cancellationToken));
+        }
+
+        return result;
     }
 }

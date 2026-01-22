@@ -177,7 +177,7 @@ public class SqliteProgressTrackingService : IProgressTrackingService, IDisposab
                 """;
             cmd.Parameters.AddWithValue("@source_path", result.SourcePath);
             cmd.Parameters.AddWithValue("@blob_name", result.BlobName);
-            cmd.Parameters.AddWithValue("@checksum", result.Checksum);
+            cmd.Parameters.AddWithValue("@checksum", result.Checksum ?? string.Empty);
             cmd.Parameters.AddWithValue("@timestamp", DateTime.UtcNow.ToString("O"));
             cmd.ExecuteNonQuery();
         }
@@ -191,7 +191,7 @@ public class SqliteProgressTrackingService : IProgressTrackingService, IDisposab
         {
             SourcePath = result.SourcePath,
             BlobName = result.BlobName,
-            Checksum = result.Checksum,
+            Checksum = result.Checksum ?? string.Empty,
             Timestamp = DateTime.UtcNow
         });
     }
@@ -207,7 +207,7 @@ public class SqliteProgressTrackingService : IProgressTrackingService, IDisposab
             """;
         cmd.Parameters.AddWithValue("@source_path", result.SourcePath);
         cmd.Parameters.AddWithValue("@blob_name", result.BlobName);
-        cmd.Parameters.AddWithValue("@checksum", result.Checksum);
+        cmd.Parameters.AddWithValue("@checksum", result.Checksum ?? string.Empty);
         cmd.Parameters.AddWithValue("@timestamp", DateTime.UtcNow.ToString("O"));
         cmd.Parameters.AddWithValue("@error_message",
             result.ErrorMessage is not null ? result.ErrorMessage : DBNull.Value);
@@ -218,15 +218,15 @@ public class SqliteProgressTrackingService : IProgressTrackingService, IDisposab
         {
             SourcePath = result.SourcePath,
             BlobName = result.BlobName,
-            Checksum = result.Checksum,
+            Checksum = result.Checksum ?? string.Empty,
             Timestamp = DateTime.UtcNow,
             ErrorMessage = result.ErrorMessage
         });
     }
 
-    private static string GetCacheKey(string sourcePath, string checksum)
+    private static string GetCacheKey(string sourcePath, string? checksum)
     {
-        return $"{sourcePath}|{checksum}";
+        return $"{sourcePath}|{checksum ?? string.Empty}";
     }
 
     public void Dispose()

@@ -11,7 +11,13 @@ public class UploadStateService : IUploadStateService
         {
             lock (_lock)
             {
-                return _state;
+                // Return a deep snapshot to avoid thread-safety issues with UI reading while worker modifies
+                return _state with
+                {
+                    FolderProgressList = _state.FolderProgressList
+                        .Select(f => f with { })  // Create copies of each FolderProgress
+                        .ToList()
+                };
             }
         }
     }
@@ -87,6 +93,84 @@ public class UploadStateService : IUploadStateService
         {
             _state.IsCompleted = true;
             _state.CurrentFile = string.Empty;
+        }
+        OnStateChanged();
+    }
+
+    public void SetEnumerating(bool isEnumerating, string? status = null)
+    {
+        lock (_lock)
+        {
+            _state.IsEnumerating = isEnumerating;
+            _state.EnumerationStatus = status ?? string.Empty;
+        }
+        OnStateChanged();
+    }
+
+    public void SetEnumerationCounts(int totalFolders, int totalFiles, List<FolderProgress> folderProgressList)
+    {
+        lock (_lock)
+        {
+            _state.TotalFolders = totalFolders;
+            _state.TotalDiscovered = totalFiles;
+            _state.FolderProgressList.Clear();
+            _state.FolderProgressList.AddRange(folderProgressList);
+        }
+        OnStateChanged();
+    }
+
+    public void SetCurrentFolder(string folderPath)
+    {
+        lock (_lock)
+        {
+            foreach (var folder in _state.FolderProgressList)
+            {
+                folder.IsCurrentFolder = folder.FolderPath == folderPath;
+            }
+        }
+        OnStateChanged();
+    }
+
+    public void RecordSuccess(string folderPath)
+    {
+        lock (_lock)
+        {
+            _state.Succeeded++;
+            _state.LastError = null;
+            var folder = _state.FolderProgressList.FirstOrDefault(f => f.FolderPath == folderPath);
+            if (folder != null)
+            {
+                folder.Succeeded++;
+            }
+        }
+        OnStateChanged();
+    }
+
+    public void RecordSkipped(string folderPath)
+    {
+        lock (_lock)
+        {
+            _state.Skipped++;
+            var folder = _state.FolderProgressList.FirstOrDefault(f => f.FolderPath == folderPath);
+            if (folder != null)
+            {
+                folder.Skipped++;
+            }
+        }
+        OnStateChanged();
+    }
+
+    public void RecordFailed(string folderPath, string? errorMessage = null)
+    {
+        lock (_lock)
+        {
+            _state.Failed++;
+            _state.LastError = errorMessage;
+            var folder = _state.FolderProgressList.FirstOrDefault(f => f.FolderPath == folderPath);
+            if (folder != null)
+            {
+                folder.Failed++;
+            }
         }
         OnStateChanged();
     }

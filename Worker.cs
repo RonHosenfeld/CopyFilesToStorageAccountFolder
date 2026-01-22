@@ -35,49 +35,84 @@ public class Worker(
 
             var progress = await progressTrackingService.LoadProgressAsync(stoppingToken);
 
-            var stats = new UploadStats();
+            // Phase 1: Pre-enumeration
+            logger.LogInformation("Starting file enumeration...");
+            uploadStateService.SetEnumerating(true, "Scanning folders...");
 
-            logger.LogInformation("Starting file discovery...");
+            var enumerationResult = await fileDiscoveryService.PreEnumerateAllFilesAsync(
+                folderPath => uploadStateService.SetEnumerating(true, $"Scanning: {folderPath}"),
+                stoppingToken);
 
-            await foreach (var file in fileDiscoveryService.DiscoverFilesAsync(stoppingToken))
+            var folderProgressList = enumerationResult.Folders
+                .Select(f => new Services.FolderProgress
+                {
+                    FolderPath = f.FolderPath,
+                    DisplayName = GetFolderDisplayName(f.FolderPath),
+                    TotalFiles = f.Files.Count
+                })
+                .ToList();
+
+            uploadStateService.SetEnumerationCounts(
+                enumerationResult.TotalFolders,
+                enumerationResult.TotalFiles,
+                folderProgressList);
+            uploadStateService.SetEnumerating(false);
+
+            logger.LogInformation(
+                "Enumeration complete: {TotalFolders} folders, {TotalFiles} files",
+                enumerationResult.TotalFolders,
+                enumerationResult.TotalFiles);
+
+            // Phase 2: Processing
+            var stats = new UploadStats { TotalDiscovered = enumerationResult.TotalFiles };
+            var fileNumber = 0;
+
+            foreach (var folder in enumerationResult.Folders)
             {
-                stats.TotalDiscovered++;
-                uploadStateService.UpdateDiscovered(stats.TotalDiscovered);
+                uploadStateService.SetCurrentFolder(folder.FolderPath);
 
-                if (progressTrackingService.IsFileCompleted(progress, file))
+                foreach (var file in folder.Files)
                 {
-                    logger.LogDebug("Skipping already completed file: {FilePath}", file.FullPath);
-                    stats.Skipped++;
-                    uploadStateService.RecordSkipped();
-                    continue;
-                }
+                    fileNumber++;
 
-                uploadStateService.SetCurrentFile(file.FullPath, file.FileSize);
+                    uploadStateService.SetCurrentFile(file.FullPath, file.FileSize);
 
-                logger.LogInformation(
-                    "Processing file {Current}: {FileName} ({Size} bytes)",
-                    stats.TotalDiscovered, file.FileName, file.FileSize);
+                    // Compute checksum lazily (only when needed for processing)
+                    var fileWithChecksum = await fileDiscoveryService.WithChecksumAsync(file, stoppingToken);
 
-                var result = await blobUploadService.UploadFileAsync(file, stoppingToken);
+                    if (progressTrackingService.IsFileCompleted(progress, fileWithChecksum))
+                    {
+                        logger.LogDebug("Skipping already completed file: {FilePath}", file.FullPath);
+                        stats.Skipped++;
+                        uploadStateService.RecordSkipped(folder.FolderPath);
+                        continue;
+                    }
 
-                if (result.Success)
-                {
-                    progressTrackingService.MarkCompleted(progress, result);
-                    stats.Succeeded++;
-                    uploadStateService.RecordSuccess();
-                }
-                else
-                {
-                    progressTrackingService.MarkFailed(progress, result);
-                    stats.Failed++;
-                    uploadStateService.RecordFailed(result.ErrorMessage);
-                }
+                    logger.LogInformation(
+                        "Processing file {Current}/{Total}: {FileName} ({Size} bytes)",
+                        fileNumber, enumerationResult.TotalFiles, file.FileName, file.FileSize);
 
-                await progressTrackingService.SaveProgressAsync(progress, stoppingToken);
+                    var result = await blobUploadService.UploadFileAsync(fileWithChecksum, stoppingToken);
 
-                if (_settings.Throttling.DelayBetweenFilesMs > 0)
-                {
-                    await Task.Delay(_settings.Throttling.DelayBetweenFilesMs, stoppingToken);
+                    if (result.Success)
+                    {
+                        progressTrackingService.MarkCompleted(progress, result);
+                        stats.Succeeded++;
+                        uploadStateService.RecordSuccess(folder.FolderPath);
+                    }
+                    else
+                    {
+                        progressTrackingService.MarkFailed(progress, result);
+                        stats.Failed++;
+                        uploadStateService.RecordFailed(folder.FolderPath, result.ErrorMessage);
+                    }
+
+                    await progressTrackingService.SaveProgressAsync(progress, stoppingToken);
+
+                    if (_settings.Throttling.DelayBetweenFilesMs > 0)
+                    {
+                        await Task.Delay(_settings.Throttling.DelayBetweenFilesMs, stoppingToken);
+                    }
                 }
             }
 
@@ -99,6 +134,12 @@ public class Worker(
             logger.LogError(ex, "Fatal error during upload process");
             throw;
         }
+    }
+
+    private static string GetFolderDisplayName(string folderPath)
+    {
+        var parts = folderPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return parts.Length > 0 ? parts[^1] : folderPath;
     }
 
     private bool ValidateConfiguration()
