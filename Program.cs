@@ -23,7 +23,7 @@ try
 
     builder.Services.AddSingleton<IFileDiscoveryService, FileDiscoveryService>();
     builder.Services.AddSingleton<IBlobUploadService, BlobUploadService>();
-    builder.Services.AddSingleton<IProgressTrackingService, ProgressTrackingService>();
+    builder.Services.AddSingleton<IProgressTrackingService, SqliteProgressTrackingService>();
 
     builder.Services.AddHostedService<Worker>();
 

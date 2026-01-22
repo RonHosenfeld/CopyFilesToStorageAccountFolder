@@ -8,6 +8,7 @@ public class UploadSettings
     public FileFilterSettings FileFilters { get; set; } = new();
     public ThrottlingSettings Throttling { get; set; } = new();
     public string ProgressFile { get; set; } = "upload-progress.json";
+    public string ProgressDatabase { get; set; } = "upload-progress.db";
 }
 
 public class AzureBlobStorageSettings
